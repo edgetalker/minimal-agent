@@ -1,4 +1,4 @@
-from exceptions import InterruptAgentFlow
+from minimal_agent.exceptions import InterruptAgentFlow
 
 class MockModel:
     def __init__(self):

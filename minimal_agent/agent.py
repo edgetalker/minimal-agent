@@ -5,12 +5,8 @@ from pathlib import Path
 from jinja2 import Template, StrictUndefined
 from pydantic import BaseModel
 
-from exceptions import InterruptAgentFlow, FormatError, LimitsExceeded, TimeExceeded
-from mock import MockModel, MockEnvironment
-
-# Mock
-Model = MockModel
-Environment = MockEnvironment
+from minimal_agent.exceptions import InterruptAgentFlow, FormatError, LimitsExceeded, TimeExceeded
+from minimal_agent import Model, Environment
 
 class AgentConfig(BaseModel):
     # 配置类使用 pydantic 
@@ -52,6 +48,7 @@ class DefaultAgent:
         ).render(**self.get_template_vars())
     
     def add_messages(self, *messages: dict) -> list[dict]:
+        """将传入的多个message打包成一个tuple"""
         self.logger.debug(messages) 
         self.messages.extend(messages)
         return list(messages) 
@@ -127,10 +124,11 @@ class DefaultAgent:
         self.n_calls += 1
         message = self.model.query(self.messages)
         self.cost += message.get("extra", {}).get("cost", 0.0)
-        self.add_messages(message)
+        self.add_messages(*message["output"])
         return message
 
     def execute_actions(self, message: dict) -> list[dict]:
         """执行消息列表中的动作，添加下一个状态的观察信息，并返回"""
-        outputs = [self.env.execute(action) for action in message.get("extra", {}).get("actions", [])]
+        # 对应 model.query 返回结构
+        outputs = [self.env.execute(action) for action in message.get("actions", [])]
         return self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
