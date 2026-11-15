@@ -1,11 +1,13 @@
 import json
 import os
+import platform
 import shlex
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
+import yaml
 from dotenv import load_dotenv
 
 from minimal_agent.agent import DefaultAgent
@@ -16,10 +18,20 @@ from minimal_agent.environments.local import LocalEnvironment
 repo = Path(__file__).resolve().parent
 load_dotenv(repo / ".env")
 
+config_path = repo / "minimal_agent" / "config" / "default.yaml"
+config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+if not isinstance(config, dict) or not isinstance(config.get("agent"), dict):
+    raise ValueError(f"配置文件必须包含 agent 配置字典：{config_path}")
+agent_config = dict(config["agent"])
+
+# YAML 中的相对输出路径按仓库目录解析，未指定时沿用默认路径。
+trajectory = Path(agent_config.get("output_path") or "outputs/trajectory.json")
+if not trajectory.is_absolute():
+    trajectory = repo / trajectory
+agent_config["output_path"] = trajectory
+
 # 每次使用新的目录，避免上次修复影响本次测试。
 workdir = Path(tempfile.mkdtemp(prefix="minimal-agent-live-"))
-# 使用仓库绝对路径，切换到临时工作目录后仍保存到仓库内。
-trajectory = repo / "outputs" / "trajectory.json"
 
 (workdir / "calculator.py").write_text(
     "def add(a, b):\n"
@@ -55,18 +67,7 @@ agent = DefaultAgent(
         base_url=os.getenv("OPENAI_BASE_URL"),
     ),
     env=LocalEnvironment(),
-    system_template="""\
-You are a coding assistant.
-Every response must contain exactly one bash tool call.
-Wait for the tool result before deciding your next action.
-Only modify calculator.py in the current working directory.
-When finished, execute exactly:
-echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
-Do not combine the completion command with other commands.
-""",
-    instance_template="{{ task }}",
-    step_limit=12,
-    output_path=trajectory,
+    **agent_config,
 )
 
 task = f"""\
@@ -78,9 +79,12 @@ task = f"""\
 4. 再次执行 `{test_command}`，确认三个测试全部通过。
 5. 测试通过后，单独执行完成标记命令。
 
+本次测试每轮只调用一次 bash，等待工具结果后再进行下一步。
+只允许修改当前目录中的 calculator.py。
 不要提前提交；如果修复后测试仍失败，继续修复。
 """
 
+print(f"配置文件：{config_path}", flush=True)
 print(f"工作目录：{workdir}", flush=True)
 print(f"轨迹文件：{trajectory}", flush=True)
 
@@ -88,7 +92,8 @@ print(f"轨迹文件：{trajectory}", flush=True)
 previous_cwd = Path.cwd()
 try:
     os.chdir(workdir)
-    result = agent.run(task)
+    # 当前 Environment 尚未提供模板变量，由测试入口补齐系统信息。
+    result = agent.run(task, **platform.uname()._asdict())
 finally:
     os.chdir(previous_cwd)
 
