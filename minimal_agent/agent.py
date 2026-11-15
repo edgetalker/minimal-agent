@@ -1,5 +1,7 @@
+import json
 import logging
 import time
+import traceback
 from pathlib import Path
 
 from jinja2 import Template, StrictUndefined
@@ -21,7 +23,10 @@ class AgentConfig(BaseModel):
 class DefaultAgent:
     def __init__(self, model: Model, env: Environment, *, config_class: type = AgentConfig, **kwargs):
         """
-        '*'标记后续的参数只能按关键字传
+        初始化以下组件：
+        1）消息列表
+        2）工具执行环境
+        3）模型
         """
         self.config = config_class(**kwargs)
         self.messages: list[dict] = []
@@ -48,10 +53,24 @@ class DefaultAgent:
         ).render(**self.get_template_vars())
     
     def add_messages(self, *messages: dict) -> list[dict]:
-        """将传入的多个message打包成一个tuple"""
+        """组装消息列表"""
         self.logger.debug(messages) 
         self.messages.extend(messages)
         return list(messages) 
+
+    def handle_uncaught_exception(self, e: Exception) -> list[dict]:
+        return self.add_messages(
+            self.model.format_message(
+                role= "exit",
+                content= str(e),
+                extra= {
+                    "exit_status": type(e).__name__,
+                    "submission": "",
+                    "exception_str": str(e),
+                    "trace_back": traceback.format_exc(),
+                },
+            )
+        )
 
     def run(self, task: str = "", **kwargs) -> dict:
         """运行agent直到终止，返回字典"""
@@ -69,9 +88,7 @@ class DefaultAgent:
             try:
                 self.step()
                 self.n_consecutive_format_errors = 0 # 每一步重置
-            # 格式异常
             except FormatError as e:
-                # 更新监控参数
                 self.cost += e.messages[0].get("extra", {}).get("cost", 0.0)
                 self.n_consecutive_format_errors += 1
                 if 0 < self.config.max_consecutive_format_errors <= self.n_consecutive_format_errors:
@@ -85,16 +102,14 @@ class DefaultAgent:
                     )
                 else:
                     self.add_messages(*e.messages)
-            # 中断流
             except InterruptAgentFlow as e:
                 self.add_messages(*e.messages)
             except Exception as e:
-                self.logger.exception("Unexpected agent error")
-                # self.handle_uncaught_exception(e)
+                self.handle_uncaught_exception(e)
                 raise
-            #finally:
+            finally:
                 # 保存agent执行轨迹
-                # self.save(self.config.output_path)
+                self.save(self.config.output_path)
             # 退出条件
             if self.messages[-1].get("role") == "exit":
                 break
@@ -123,12 +138,43 @@ class DefaultAgent:
             )
         self.n_calls += 1
         message = self.model.query(self.messages)
+        # TODO cost字段
         self.cost += message.get("extra", {}).get("cost", 0.0)
-        self.add_messages(*message["output"])
+        self.add_messages(message)
         return message
 
     def execute_actions(self, message: dict) -> list[dict]:
-        """执行消息列表中的动作，添加下一个状态的观察信息，并返回"""
-        # 对应 model.query 返回结构
-        outputs = [self.env.execute(action) for action in message.get("actions", [])]
+        """从agent返回信息中提取工具参数并执行，返回 function_call_output """
+        outputs = [self.env.execute(action) for action in message.get("extra", {}).get("actions", [])]
         return self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))
+
+    def serialize(self) -> dict:
+        """将 agent state 序列化为 json 字典"""
+        last_message = self.messages[-1] if self.messages else {}
+        last_extra = last_message.get("extra", {})
+
+        # 组织完整的状态字段
+        agent_data = {
+            "trajectory_format": "minimal-agent-v1",
+            "messages": self.messages,
+            "info": {
+                "model_stats": {
+                    "api_calls": self.n_calls,
+                    "instance_cost": self.cost,
+                },
+                "config": {
+                    "agent": self.config.model_dump(mode="json")
+                },
+                "exit_status": last_extra.get("exit_status", ""),
+                "submission": last_extra.get("submission", ""),
+            }
+        }
+        # TODO 当前只保存 agent 执行轨迹，没有 model、env 信息
+        return agent_data
+
+    def save(self, path: Path | None) -> dict:
+        data = self.serialize()
+        if path:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+        return data

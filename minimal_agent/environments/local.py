@@ -41,6 +41,9 @@ class LocalEnvironment:
                 {
                     "role": "exit",
                     "content": submission,
-                    "extra": {"exit_status": "Submitted", "submission": submission},
+                    "extra": {
+                        "exit_status": "Submitted",
+                        "submission": submission
+                    },
                 }
             )
