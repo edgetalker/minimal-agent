@@ -60,12 +60,14 @@ class TestCalculator(unittest.TestCase):
 # 使用运行本脚本的 Python，避免 shell 中的 Python 环境不同。
 test_command = f"{shlex.quote(sys.executable)} -m unittest -v"
 
-agent = DefaultAgent(
-    model=OpenAIModel(
-        model=os.environ["OPENAI_MODEL"],
+model=OpenAIModel(
+        **config["model"],
         api_key=os.environ["OPENAI_API_KEY"],
         base_url=os.getenv("OPENAI_BASE_URL"),
-    ),
+)
+
+agent = DefaultAgent(
+    model=model,
     env=LocalEnvironment(),
     **agent_config,
 )
@@ -129,7 +131,7 @@ observations = {}
 for message in messages:
     if message.get("object") == "response":
         for action in message["extra"]["actions"]:
-            call_id = action["call_id"]
+            call_id = action["tool_call_id"]
             assert call_id not in calls, f"重复 call_id：{call_id}"
             calls[call_id] = action["command"]
 

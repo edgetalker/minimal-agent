@@ -138,7 +138,6 @@ class DefaultAgent:
             )
         self.n_calls += 1
         message = self.model.query(self.messages)
-        # TODO cost字段
         self.cost += message.get("extra", {}).get("cost", 0.0)
         self.add_messages(message)
         return message

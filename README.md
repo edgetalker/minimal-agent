@@ -17,3 +17,6 @@ agent.run(task) -> step() -> query() -> execute_actions() -> exit 显示退出
 
 ## Agent 执行轨迹保存
 + serialize() -> save() 
+
+## 完整的计费实现
++ cost

@@ -1,5 +1,5 @@
 class InterruptAgentFlow(Exception):
-
+    """Agent 控制流中断时抛出"""
     def __init__(self, *messages: dict):
         self.messages = messages
         super().__init__()

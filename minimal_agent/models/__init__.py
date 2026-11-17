@@ -2,16 +2,35 @@ import json
 import time
 
 from openai import OpenAI
+from pydantic import BaseModel, ConfigDict, Field
 from minimal_agent.exceptions import FormatError
+
+from jinja2 import StrictUndefined, Template
+
+class TokenPricing(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input: float = Field(ge=0, allow_inf_nan=False)
+    cached_input: float = Field(ge=0, allow_inf_nan=False)
+    output: float = Field(ge=0, allow_inf_nan=False)
+
+
+class ModelConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: str
+    pricing: TokenPricing | None = None
+    observation_template: str
 
 class OpenAIModel:
     def __init__(
         self, 
-        model: str, 
+        *,
         base_url: str | None = None, 
         api_key: str | None = None,
+        **kwargs,
     ):
-        self.model = model
+        self.config = ModelConfig(**kwargs)
         self.client = OpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -37,20 +56,21 @@ class OpenAIModel:
         ]
 
     def _raise_format_error(self, error: str):
+        # 需要引入 Template
         raise FormatError({
+            "type": "message",
             "role": "user",
-            "content": (
+            "content": [{"type": "input_text","text":
                 f"工具调用格式错误：{error}\n"
                 "本轮未执行任何命令，请重新调用 bash 工具。\n"
                 '参数格式：{"command": "需要执行的命令"}\n'
                 "如果任务已经完成，请单独执行：\n"
                 "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
-            ),
+            }],
+            "extra": {"interrupt_type": "FormatError"}
         })
 
-
     def _parse_actions(self, response: dict) -> list[dict]:
-        # TODO: 对比 models/utils/actions_toolcall_response.py
         """从 Responses API 的结构化输出中提取工具"""
         calls = [
             item
@@ -88,9 +108,8 @@ class OpenAIModel:
                 )
             
             actions.append({
-                "name": item.name,
                 "command": command,
-                "call_id": item.call_id,
+                "tool_call_id": item.call_id,
             })
 
         return actions
@@ -110,54 +129,84 @@ class OpenAIModel:
         # 1. 将消息字段转换为 API 的输入字段
         input = self._prepare_messages_for_api(messages)
 
-        # 2. 获取模型响应（重试+计费字段计算）
+        # 2. 获取模型响应并计算费用
         response = self.client.responses.create(
-            model=self.model,
+            model=self.config.model,
             input=input,
             tools=self.tools,  
         )
+        
+        cost_output = self._calculate_cost(response.usage)
 
-        if response.status != "completed":
-            raise RuntimeError(
-                f"模型响应未完成：status={response.status}, "
-                f"details={response.incomplete_details}, "
-                f"error={response.error}"
-            )
         # 3. 解析回答中的工具调用
         try:
             actions = self._parse_actions(response)
-        except FormatError as exc:
-            metadata = exc.messages[0].setdefault("extra", {})
+        except FormatError as e:
+            e.messages[0]["extra"].update(cost_output)
             try:
-                metadata["response"] = response.model_dump(mode="json")
+                e.messages[0]["extra"]["response"] = response.model_dump(mode="json")
             except Exception:
-                metadata["response"] = repr(response)
+                # model_dump failed (e.g. unserializable object); fall back to repr
+                # so the spec contract ("response MUST be persisted") holds unconditionally.
+                e.messages[0]["extra"]["response"] = repr(response)
             raise
 
         # 4. 组装为模型回答
         message = response.model_dump(mode="json", by_alias=True, exclude_none=True) if hasattr(response, "model_dump") else dict(response)
         message["extra"] = {
             "actions": actions,
-            # **cost_output,
+            **cost_output,
             "timestamp": time.time()
         }
         return message
-    
+
+    def _calculate_cost(self, usage: dict) -> dict[str, float]:
+        pricing = self.config.pricing
+        cached_tokens = usage.input_tokens_details.cached_tokens
+        uncached_tokens = usage.input_tokens - cached_tokens
+
+        cost = (uncached_tokens * pricing.input
+                + cached_tokens * pricing.cached_input
+                + usage.output_tokens * pricing.output
+            ) / 1000000
+        return {"cost": cost}
+
     def format_message(self, **kwargs) -> dict:
         return dict(kwargs)
 
     def format_observation_messages(
-            self, message: dict, outputs: list[dict], template_vars: dict | None
+            self, message: dict, outputs: list[dict], template_vars: dict | None = None
         ) -> list[dict]:
         """格式化工具调用执行结果"""
         actions = message.get("extra", {}).get("actions", [])
-        # TODO 需要与model解耦 并应用observation 模版
-        return [
-            {
-                "type": "function_call_output",
-                "call_id": action["call_id"],
-                "output": json.dumps(output, ensure_ascii=False)
+
+        # 1. 补齐没有执行结果的工具调用
+        not_executed = {"output": "", "returncode": -1, "exception_info": "action was not executed"}
+        padded_outputs = outputs + [not_executed] * (len(actions)-len(outputs))
+
+        # 2. 模版渲染模型看到的内容
+        results = []
+        for action, output in zip(actions, padded_outputs):
+            content = Template(self.config.observation_template, undefined=StrictUndefined).render(
+                output=output, **(template_vars or {})
+            )
+            msg: dict = {
+                "extra": {
+                    "raw_output": output.get("output", ""),
+                    "returncode": output.get("returncode"),
+                    "timestamp": time.time(),
+                    "exception_info": output.get("exception_info"),
+                    **output.get("extra", {}),
+                },
             }
-            for action, output in zip(actions, outputs)
-        ]
+            if "tool_call_id" in action:
+                msg["type"] = "function_call_output"
+                msg["call_id"] = action["tool_call_id"]
+                msg["output"] = content
+            else:
+                msg["type"] = "message"
+                msg["role"] = "user"
+                msg["content"] = [{"type": "input_text", "text": content}]
+            results.append(msg)
+        return results
         
