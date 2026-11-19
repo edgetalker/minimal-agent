@@ -113,11 +113,11 @@ check = subprocess.run(
 )
 assert check.returncode == 0, check.stdout + check.stderr
 
-# 验证保存的 JSON、统计和内存中的消息一致。
+# 验证保存的 JSON 与 agent 序列化结果一致。
 data = json.loads(trajectory.read_text(encoding="utf-8"))
 messages = data["messages"]
 
-assert messages == agent.messages, "文件与内存中的消息不一致"
+assert data == agent.serialize(), "文件与 agent 序列化结果不一致"
 assert data["info"]["exit_status"] == "Submitted"
 assert data["info"]["model_stats"]["api_calls"] == agent.n_calls
 assert messages[0]["role"] == "system"

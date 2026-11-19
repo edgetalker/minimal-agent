@@ -10,6 +10,40 @@ from pydantic import BaseModel
 from minimal_agent.exceptions import InterruptAgentFlow, FormatError, LimitsExceeded, TimeExceeded
 from minimal_agent import Model, Environment
 
+
+def _compact_response_usage(response: dict) -> dict:
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return response
+
+    compact_usage = {
+        key: usage[key]
+        for key in ("input_tokens", "output_tokens", "total_tokens")
+        if key in usage
+    }
+    for details_key, token_key in (
+        ("input_tokens_details", "cached_tokens"),
+        ("output_tokens_details", "reasoning_tokens"),
+    ):
+        details = usage.get(details_key)
+        if isinstance(details, dict) and token_key in details:
+            compact_usage[details_key] = {token_key: details[token_key]}
+
+    return {**response, "usage": compact_usage}
+
+
+def _serialize_message(message: dict) -> dict:
+    if message.get("object") == "response":
+        return _compact_response_usage(message)
+
+    extra = message.get("extra")
+    if isinstance(extra, dict) and extra.get("interrupt_type") == "FormatError":
+        response = extra.get("response")
+        if isinstance(response, dict):
+            return {**message, "extra": {**extra, "response": _compact_response_usage(response)}}
+    return message
+
+
 class AgentConfig(BaseModel):
     # 配置类使用 pydantic 
     system_template: str
@@ -155,7 +189,7 @@ class DefaultAgent:
         # 组织完整的状态字段
         agent_data = {
             "trajectory_format": "minimal-agent-v1",
-            "messages": self.messages,
+            "messages": [_serialize_message(message) for message in self.messages],
             "info": {
                 "model_stats": {
                     "api_calls": self.n_calls,

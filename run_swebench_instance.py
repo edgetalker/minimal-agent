@@ -21,15 +21,18 @@ def checked_output(env: DockerEnvironment, command: str) -> str:
     return result["output"]
 
 
-def run_instance(instance: dict, model: OpenAIModel, agent_config: dict, output_root: Path) -> Path:
+def run_instance(
+    instance: dict, model: OpenAIModel, agent_config: dict, output_root: Path, *, run_dir: Path | None = None
+) -> Path:
     instance_id = instance["instance_id"]
     base = instance["base_commit"]
     if not re.fullmatch(r"[\w.-]+__[\w.-]+-\d+", instance_id) or not re.fullmatch(r"[a-f0-9]{40}", base):
         raise ValueError("Invalid SWE-bench instance_id or base_commit")
 
-    out = output_root / instance_id
-    out.mkdir(parents=True, exist_ok=True)
-    run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=out))
+    if run_dir is None:
+        out = output_root / instance_id
+        out.mkdir(parents=True, exist_ok=True)
+        run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=out))
     print(f"Run directory: {run_dir}", flush=True)
 
     image_id = instance_id.lower().replace("__", "_1776_")
