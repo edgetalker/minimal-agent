@@ -2,6 +2,34 @@
 
 一个可运行、可复现的最小 SWE-bench Agent。它通过 OpenAI Responses API 调用模型，在每道题独立的 Docker 容器中执行 Bash 命令，保存补丁、执行轨迹和费用统计。支持单题调试、串行批跑和断点恢复，生成的预测可以直接交给 SWE-bench 官方评测器。
 
+## SWE-bench 任务执行流程
+
+```mermaid
+flowchart TD
+    input["题目 JSON 或批跑清单"] --> setup["逐题启动 Docker<br/>核对仓库基线和工作区"]
+    setup --> budget{"步数、费用或运行时间达到上限？"}
+    budget -->|否| model["Responses API<br/>读取题目和历史消息"]
+    model -->|Bash 工具调用| docker["容器内执行 Bash<br/>读代码、编辑、运行测试"]
+    docker -->|命令输出和退出码| observe["追加工具结果或纠错反馈"]
+    model -->|可恢复的格式错误| observe
+    observe --> budget
+
+    budget -->|是| stop["记录终止状态"]
+    model -->|格式错误达到上限或 API 异常| stop
+    docker -->|命令超时| stop
+    docker -->|检测到提交标记| submit["记录 Submitted"]
+
+    observe -.-> trace["保存 trajectory.json"]
+    stop -.-> trace
+    submit -.-> trace
+    submit --> patch["相对于容器初始提交提取 Git diff"]
+    patch -->|补丁非空| prediction["写入 predictions.jsonl<br/>批跑汇总各题预测"]
+
+    prediction --> evaluate["SWE-bench 官方评测器<br/>应用补丁并运行测试"]
+    tests["官方测试补丁与测试清单"] --> evaluate
+    evaluate --> report["report.json<br/>FAIL_TO_PASS、PASS_TO_PASS 与 resolved"]
+```
+
 ## 安装与配置
 
 需要 Python 3.12 或更新版本、`uv`、运行中的 Docker，以及支持 Responses API 的模型服务。SWE-bench 实例镜像使用 `linux/amd64`。Apple Silicon 上需要 Docker 支持运行 AMD64 容器。
@@ -100,32 +128,3 @@ uv run --locked python run_swebench_batch.py \
 - 单题 `sympy__sympy-20590` 使用 25 步上限，Agent 在第 17 次模型调用提交。Agent 补丁和参考补丁均得到 `resolved: true`。
 - 上述五题使用 `gpt-6-sol` 和 `--step-limit 50` 串行运行。5 题均提交并完成评测，4 题通过。Sphinx 的 Agent 补丁漏了两个回归用例，参考补丁通过。5 份轨迹均已保存。
 - 用同一配置重启该批次，5 道已提交的题全部跳过。
-
-## 实现笔记
-
-### Mock 版本实现
-
-agent.run(task) -> step() -> query() -> execute_actions() -> exit 显示退出
-+ 动态 Prompt 渲染逻辑 - jinja2 条件化渲染
-+ Mock Agent && Mock Environment
-
-### 真实 API 接入
-
-+ Responses API - 无状态设计 - 如何维护每次调用的上下文
-+ 在顶层目录通过 Protocol 定义子类行为 -> Model、Environment、Agent
-+ model: 连接client - 发起query，得到结果 - 解析tool calling
-+ environment: subprocess实现
-+ 通过异常来控制中止条件的触发：sp 中显示指定结束命令，env中捕获命令并给出退出信号
-
-### 统一消息结构
-
-+ 一条完整的模型响应是一个复杂的结构化对象，最需要关注的是 output 字段
-+ 将错误信息转换为一条告诉模型如何改正的消息
-
-### Agent 执行轨迹保存
-
-+ serialize() -> save()
-
-### 完整的计费实现
-
-+ cost
